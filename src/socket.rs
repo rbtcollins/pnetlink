@@ -73,6 +73,12 @@ impl AsRawFd for NetlinkSocket {
 	}
 }
 
+impl Drop for NetlinkSocket {
+	fn drop(&mut self) {
+		unsafe { libc::close(self.fd) };
+	}
+}
+
 impl NetlinkSocket {
 	pub fn bind(proto: NetlinkProtocol, groups: u32) -> Result<NetlinkSocket> {
 		use std::mem::size_of;
