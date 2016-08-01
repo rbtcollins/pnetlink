@@ -55,6 +55,7 @@ impl<'a> Iterator for NetlinkPacketIterator<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             loop {
+                // TODO: figure out how to make this safe
                 let nl_payload = unsafe { mem::transmute(&self.buf[self.read_at..]) };
                 if let Some(pkt) = NetlinkPacket::new(nl_payload) {
                     let pid = unsafe { libc::getpid() } as u32;

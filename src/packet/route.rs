@@ -57,11 +57,12 @@ fn align(len: usize) -> usize {
     ((len)+RTA_ALIGNTO-1) & !(RTA_ALIGNTO-1)
 }
 
-struct Link {
+struct Link<'a> {
+    packet: IfInfoPacket<'a>,
 }
 
-impl Link {
-    fn dump_links_request<'a>() -> [u8;32] {
+impl<'a> Link<'a> {
+    fn dump_links_request<'b>() -> [u8;32] {
         let len = MutableNetlinkPacket::minimum_packet_size() + MutableIfInfoPacket::minimum_packet_size();
         let mut buf = [0; 32];
         assert!(len == 32);
@@ -77,92 +78,25 @@ impl Link {
         buf
     }
 
-    fn read_netlink_response(sock: &mut NetlinkSocket) {
-        'done: loop {
-            let mut rcvbuf = [0; 4096];
-            let mut big_buff = vec![0; 4096];
-            if let Ok(len) = sock.recv(&mut rcvbuf) {
-                if len == 0 {
-                    break;
-                }
-                let mut nl_payload = &rcvbuf[0..len];
-                //println!("{:?}", nl_payload);
-                big_buff.extend_from_slice(&nl_payload[..]);
-                let mut pkt_idx = 0;
-                loop {
-                    //println!("PKT IDX: {}", pkt_idx);
-                    if let Some(msg) = NetlinkPacket::new(nl_payload) {
-                        let pid = unsafe { libc::getpid() } as u32;
-                        let kind = msg.get_kind();
-                        match kind {
-                            NLMSG_NOOP => { println!("noop") },
-                            NLMSG_ERROR => { println!("err") },
-                            NLMSG_DONE => { println!("done"); break 'done; },
-                            NLMSG_OVERRUN => { println!("overrun") },
-                            _ => {},
-                        }
-                        pkt_idx = align(msg.get_length() as usize);
-                        if pkt_idx == 0 {
-                            break;
-                        }
-                        nl_payload = &nl_payload[pkt_idx..];
-
-                        println!("{:?} {}", msg, pid);
-
-                        if msg.get_pid() != pid {
-                            println!("wrong pid!");
-                            continue;
-                        }
-                        if msg.get_kind() != RTM_NEWLINK {
-                            println!("bad type!");
-                            continue;
-                        }
-                    } else {
-                        break;
-                    }
-                }
-            }
-        }
-    }
-
     fn dump_links() {
+        use std::ffi::CStr;
+        use packet::netlink::NetlinkPacketIterator;
         let mut sock = NetlinkSocket::bind(NetlinkProtocol::Route, 0 as u32).unwrap();
-        sock.send(&Self::dump_links_request()).unwrap();
-        Self::read_netlink_response(&mut sock);
-    }
-}
+        sock.send(&Link::dump_links_request()).unwrap();
 
-#[test]
-fn netlink_route_dump_links_2() {
-    Link::dump_links();
-}
+        let iter = NetlinkPacketIterator::new(&mut sock);
+        for msg in iter {
+            println!("{:?}", msg);
+            if msg.get_kind() != RTM_NEWLINK {
+                println!("bad type!");
+                continue;
+            }
 
-#[test]
-fn netlink_route_dump_links_3() {
-    use std::ffi::CStr;
-    use packet::netlink::NetlinkPacketIterator;
-    let mut sock = NetlinkSocket::bind(NetlinkProtocol::Route, 0 as u32).unwrap();
-    sock.send(&Link::dump_links_request()).unwrap();
-    let iter = NetlinkPacketIterator::new(&mut sock);
-    for msg in iter {
-        println!("{:?}", msg);
-        if msg.get_kind() != RTM_NEWLINK {
-            println!("bad type!");
-            continue;
-        }
-
-        if let Some(ifi) = IfInfoPacket::new(&msg.payload()[0..]) {
-            println!("├ ifi: {:?}", ifi);
-            let mut payload = &ifi.payload()[0..];
-            let total_len = payload.len();
-            let mut idx = 0;
-            loop {
-                if let Some(rta) = RtAttrPacket::new(payload) {
-                    let len = rta.get_rta_len() as usize;
-                    //println!("RTA LEN: {}, TOTAL: {}", len, total_len - idx);
-                    if len > total_len - idx || len < 4 {
-                        break;
-                    }
+            if let Some(ifi) = IfInfoPacket::new(&msg.payload()[0..]) {
+                println!("├ ifi: {:?}", ifi);
+                let payload = &ifi.payload()[0..];
+                let iter = RtAttrIterator::new(payload);
+                for rta in iter {
                     match rta.get_rta_type() {
                         IFLA_IFNAME => {
                             println!(" ├ ifname: {:?}", CStr::from_bytes_with_nul(rta.payload()));
@@ -177,128 +111,43 @@ fn netlink_route_dump_links_3() {
                             println!(" ├ {:?}", rta);
                         },
                     }
-                    let mut align = align(len);
-                    idx += align;
-                    payload = &payload[align..];
-                } else {
-                    //println!("CANT PARSE RTATTR");
-                    break;
                 }
             }
         }
     }
 }
 
-#[test]
-fn netlink_route_dump_links_1() {
-    use libc;
-    use packet::netlink::{MutableNetlinkPacket,NetlinkPacket};
-    use packet::route::{MutableIfInfoPacket,IfInfoPacket};
-    use packet::route::RtAttrPacket;
-    use packet::netlink::{NLM_F_REQUEST, NLM_F_DUMP};
-    use packet::netlink::{NLMSG_NOOP,NLMSG_ERROR,NLMSG_DONE,NLMSG_OVERRUN};
-    use packet::route::{RTM_GETLINK,RTM_NEWLINK,IFLA_IFNAME,IFLA_ADDRESS,IFLA_LINKINFO};
-    use socket::{NetlinkSocket,NetlinkProtocol};
-    use pnet::packet::MutablePacket;
-    use pnet::packet::Packet;
-    use pnet::packet::PacketSize;
-    use std::ffi::CStr;
+pub struct RtAttrIterator<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
 
-    let mut sock = NetlinkSocket::bind(NetlinkProtocol::Route, 0 as u32).unwrap();
-    let mut buf = [0; 1024];
-    {
-        let mut pkt = MutableNetlinkPacket::new(&mut buf).unwrap();
-        pkt.set_length(MutableNetlinkPacket::minimum_packet_size() as u32 + 
-                MutableIfInfoPacket::minimum_packet_size() as u32);
-        pkt.set_flags(NLM_F_REQUEST | NLM_F_DUMP/*| flags */);
-        pkt.set_kind(RTM_GETLINK);
-        let mut ifinfo_buf = pkt.payload_mut();
-        let mut ifinfo = MutableIfInfoPacket::new(&mut ifinfo_buf).unwrap();
-        ifinfo.set_family(0 /* AF_UNSPEC */);
-    }
-    
-    sock.send(&buf[0..32]);
-    'done: loop {
-    let mut rcvbuf = [0; 4096];
-    let mut big_buff = vec![0; 4096];
-    if let Ok(len) = sock.recv(&mut rcvbuf) {
-        if len == 0 {
-            break;
+impl<'a> RtAttrIterator<'a> {
+    fn new(buf: &'a [u8]) -> Self {
+        RtAttrIterator {
+            buf: buf,
+            pos: 0,
         }
-        let mut nl_payload = &rcvbuf[0..len];
-        //println!("{:?}", nl_payload);
-        big_buff.extend_from_slice(&nl_payload[..]);
-        let mut pkt_idx = 0;
-        loop {
-            //println!("PKT IDX: {}", pkt_idx);
-            if let Some(msg) = NetlinkPacket::new(nl_payload) {
-                let pid = unsafe { libc::getpid() } as u32;
-                let kind = msg.get_kind();
-                match kind {
-                    NLMSG_NOOP => { println!("noop") },
-                    NLMSG_ERROR => { println!("err") },
-                    NLMSG_DONE => { println!("done"); break 'done; },
-                    NLMSG_OVERRUN => { println!("overrun") },
-                    _ => {},
-                }
-                pkt_idx = align(msg.get_length() as usize);
-                if pkt_idx == 0 {
-                    break;
-                }
-                nl_payload = &nl_payload[pkt_idx..];
+    }
+}
 
-                println!("{:?} {}", msg, pid);
+impl<'a> Iterator for RtAttrIterator<'a> {
+    type Item = RtAttrPacket<'a>;
 
-                if msg.get_pid() != pid {
-                    println!("wrong pid!");
-                    continue;
-                }
-                if msg.get_kind() != RTM_NEWLINK {
-                    println!("bad type!");
-                    continue;
-                }
-            
-                if let Some(ifi) = IfInfoPacket::new(&msg.payload()[0..]) {
-                    println!("├ ifi: {:?}", ifi);
-                    let mut payload = &ifi.payload()[0..];
-                    let total_len = payload.len();
-                    let mut idx = 0;
-                    loop {
-                        if let Some(rta) = RtAttrPacket::new(payload) {
-                            let len = rta.get_rta_len() as usize;
-                            //println!("RTA LEN: {}, TOTAL: {}", len, total_len - idx);
-                            if len > total_len - idx || len < 4 {
-                                break;
-                            }
-                            match rta.get_rta_type() {
-                                IFLA_IFNAME => {
-                                    println!(" ├ ifname: {:?}", CStr::from_bytes_with_nul(rta.payload()));
-                                },
-                                IFLA_ADDRESS => {
-                                    println!(" ├ hw addr: {:?}", rta.payload());
-                                },
-                                IFLA_LINKINFO => {
-                                    println!(" ├ LINKINFO {:?}", rta);
-                                },
-                                _ => {
-                                    println!(" ├ {:?}", rta);
-                                },
-                            }
-                            let mut align = align(len);
-                            idx += align;
-                            payload = &payload[align..];
-                        } else {
-                            //println!("CANT PARSE RTATTR");
-                            break;
-                        }
-                    }
-                } else {
-                    break;
-                }
-            } else {
-                break;
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(rta) = RtAttrPacket::new(&self.buf[self.pos..]) {
+            let len = rta.get_rta_len() as usize; 
+            if len < 4 {
+                return None;
             }
+            self.pos += align(len as usize);
+            return Some(rta);
         }
+        None
     }
-    }
+}
+
+#[test]
+fn netlink_route_dump_links() {
+    Link::dump_links();
 }
