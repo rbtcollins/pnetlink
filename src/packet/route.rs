@@ -137,9 +137,60 @@ fn netlink_route_dump_links_2() {
     Link::dump_links();
 }
 
-/*
 #[test]
-fn netlink_route_dump_links() {
+fn netlink_route_dump_links_3() {
+    use std::ffi::CStr;
+    use packet::netlink::NetlinkPacketIterator;
+    let mut sock = NetlinkSocket::bind(NetlinkProtocol::Route, 0 as u32).unwrap();
+    sock.send(&Link::dump_links_request()).unwrap();
+    let iter = NetlinkPacketIterator::new(&mut sock);
+    for msg in iter {
+        println!("{:?}", msg);
+        if msg.get_kind() != RTM_NEWLINK {
+            println!("bad type!");
+            continue;
+        }
+
+        if let Some(ifi) = IfInfoPacket::new(&msg.payload()[0..]) {
+            println!("├ ifi: {:?}", ifi);
+            let mut payload = &ifi.payload()[0..];
+            let total_len = payload.len();
+            let mut idx = 0;
+            loop {
+                if let Some(rta) = RtAttrPacket::new(payload) {
+                    let len = rta.get_rta_len() as usize;
+                    //println!("RTA LEN: {}, TOTAL: {}", len, total_len - idx);
+                    if len > total_len - idx || len < 4 {
+                        break;
+                    }
+                    match rta.get_rta_type() {
+                        IFLA_IFNAME => {
+                            println!(" ├ ifname: {:?}", CStr::from_bytes_with_nul(rta.payload()));
+                        },
+                        IFLA_ADDRESS => {
+                            println!(" ├ hw addr: {:?}", rta.payload());
+                        },
+                        IFLA_LINKINFO => {
+                            println!(" ├ LINKINFO {:?}", rta);
+                        },
+                        _ => {
+                            println!(" ├ {:?}", rta);
+                        },
+                    }
+                    let mut align = align(len);
+                    idx += align;
+                    payload = &payload[align..];
+                } else {
+                    //println!("CANT PARSE RTATTR");
+                    break;
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn netlink_route_dump_links_1() {
     use libc;
     use packet::netlink::{MutableNetlinkPacket,NetlinkPacket};
     use packet::route::{MutableIfInfoPacket,IfInfoPacket};
@@ -251,4 +302,3 @@ fn netlink_route_dump_links() {
     }
     }
 }
-*/
