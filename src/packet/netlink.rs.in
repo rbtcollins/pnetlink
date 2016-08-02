@@ -9,6 +9,10 @@ pub struct Netlink {
     _pad1: u16le,
     pid: u32le,
     #[payload]
+    #[length_fn = "payload_length"]
     payload: Vec<u8>,
 }
 
+fn payload_length(pkt: &NetlinkPacket) -> usize {
+    pkt.get_length() as usize - 16
+}

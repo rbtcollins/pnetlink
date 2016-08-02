@@ -2,6 +2,7 @@ use packet::netlink::{MutableNetlinkPacket,NetlinkPacket};
 use packet::netlink::{NLM_F_REQUEST, NLM_F_DUMP};
 use packet::netlink::{NLMSG_NOOP,NLMSG_ERROR,NLMSG_DONE,NLMSG_OVERRUN};
 use ::socket::{NetlinkSocket,NetlinkProtocol};
+use packet::netlink::{NetlinkPacketIterator,NetlinkConnection,NetlinkConnectionIterator};
 use pnet::packet::MutablePacket;
 use pnet::packet::Packet;
 use pnet::packet::PacketSize;
@@ -62,22 +63,44 @@ struct Link<'a> {
 }
 
 impl<'a> Link<'a> {
-    fn dump_links_request<'b>() -> [u8;32] {
+    fn dump_links_request<'b>(buf: &'b mut [u8]) -> NetlinkPacket<'b> {
         let len = MutableNetlinkPacket::minimum_packet_size() + MutableIfInfoPacket::minimum_packet_size();
-        let mut buf = [0; 32];
-        assert!(len == 32);
         {
-            let mut pkt = MutableNetlinkPacket::new(&mut buf).unwrap();
-            pkt.set_length(len as u32);
-            pkt.set_flags(NLM_F_REQUEST | NLM_F_DUMP);
-            pkt.set_kind(RTM_GETLINK);
-            let mut ifinfo_buf = pkt.payload_mut();
-            let mut ifinfo = MutableIfInfoPacket::new(&mut ifinfo_buf).unwrap();
-            ifinfo.set_family(0 /* AF_UNSPEC */);
+            let mut pkt = MutableNetlinkPacket::new(buf).unwrap();
+            {
+                pkt.set_length(len as u32);
+                pkt.set_flags(NLM_F_REQUEST | NLM_F_DUMP);
+                pkt.set_kind(RTM_GETLINK);
+                let mut ifinfo_buf = pkt.payload_mut();
+                let mut ifinfo = MutableIfInfoPacket::new(&mut ifinfo_buf).unwrap();
+                ifinfo.set_family(0 /* AF_UNSPEC */);
+            }
         }
-        buf
+        NetlinkPacket::new(buf).unwrap()
     }
 
+    fn dump_links() {
+        let mut conn = NetlinkConnection::new();
+        let mut buf = [0; 32];
+        let mut reply = conn.send(Self::dump_links_request(&mut buf));
+
+        while let Ok(Some(pkt)) = reply.read_netlink() {
+            println!("{:?}", pkt);
+            /*
+            if pkt.kind == NLMSG_DONE {
+                break;
+            }
+            */
+        }
+
+        /*
+        for pkt in reply {
+            println!("PKT: {:?}", pkt);
+        }
+        */
+    }
+
+    /*
     fn dump_links() {
         use std::ffi::CStr;
         use packet::netlink::NetlinkPacketIterator;
@@ -115,6 +138,7 @@ impl<'a> Link<'a> {
             }
         }
     }
+    */
 }
 
 pub struct RtAttrIterator<'a> {
