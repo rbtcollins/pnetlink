@@ -37,29 +37,9 @@ fn align(len: usize) -> usize {
     ((len)+RTA_ALIGNTO-1) & !(RTA_ALIGNTO-1)
 }
 
-/* XXX: NetlinkIterable */
-pub struct NetlinkPacketIterator<'a> {
-    buf: &'a [u8],
-}
-
-impl<'a> NetlinkPacketIterator<'a> {
-    fn new(buf: &'a [u8]) -> Self {
-        NetlinkPacketIterator {
-            buf: buf 
-        }
-    }
-}
-
-impl<'a> Iterator for NetlinkPacketIterator<'a> {
-    type Item = NetlinkPacket<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(pkt) = NetlinkPacket::new(self.buf) {
-            let len = align(pkt.get_length() as usize);
-            self.buf = &self.buf[len..];
-            return Some(pkt);
-        }
-        None
+impl<'a> NetlinkIterable<'a> {
+    pub fn new(buf: &'a [u8]) -> Self {
+        NetlinkIterable { buf: buf }
     }
 }
 
@@ -76,7 +56,7 @@ fn read_ip_link_dump() {
     let mut data = vec![];
     r.read_to_end(&mut data).unwrap();
 
-    let it = NetlinkPacketIterator::new(&data);
+    let it = NetlinkIterable::new(&data);
     for pkt in it {
         println!("{:?}", pkt);
     }
@@ -94,8 +74,9 @@ fn read_ip_link_dump_2() {
     let mut r = BufReader::new(f);
     let mut reader = NetlinkReader::new(r);
     while let Ok(Some(pkt)) = reader.read_netlink() {
+        let pkt = pkt.get_packet();
         println!("{:?}", pkt);
-        if pkt.kind == NLMSG_DONE {
+        if pkt.get_kind() == NLMSG_DONE {
             break;
         }
     }
@@ -112,15 +93,37 @@ fn read_ip_link_sock() {
     let mut r = NetlinkSocket::bind(NetlinkProtocol::Route, 0 as u32).unwrap();
     let mut reader = NetlinkReader::new(r);
     while let Ok(Some(pkt)) = reader.read_netlink() {
+        let pkt = pkt.get_packet();
         println!("{:?}", pkt);
+    }
+}
+
+pub struct NetlinkSlot {
+    data: Vec<u8>,
+}
+
+impl NetlinkSlot {
+    fn new(data: &[u8]) -> Self {
+        NetlinkSlot { data: data.to_owned() }
+    }
+
+    pub fn get_packet(&self) -> NetlinkPacket {
+        NetlinkPacket::new(&self.data[..]).unwrap()
     }
 }
 
 pub struct NetlinkReader<R: Read> {
     reader: R,
     buf: Vec<u8>,
-    write_at: usize,
     read_at: usize,
+    state: NetlinkReaderState,
+}
+
+enum NetlinkReaderState {
+    Done,
+    NeedMore,
+    Error,
+    Parsing,
 }
 
 impl<R: Read> NetlinkReader<R> {
@@ -128,152 +131,109 @@ impl<R: Read> NetlinkReader<R> {
         NetlinkReader {
             reader: reader,
             buf: vec![],
-            write_at: 0,
             read_at: 0,
+            state: NetlinkReaderState::NeedMore,
         }
     }
 }
 
+impl<R: Read> ::std::iter::IntoIterator for NetlinkReader<R> {
+    type Item = NetlinkSlot;
+    type IntoIter = NetlinkSlotIterator<R>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        NetlinkSlotIterator { reader: self }
+    }
+}
+
 impl<R: Read> NetlinkReader<R> {
-    pub fn read_netlink(&mut self) -> io::Result<Option<Netlink>> {
+    pub fn read_netlink(&mut self) -> io::Result<Option<NetlinkSlot>> {
         loop {
+            match self.state {
+                NetlinkReaderState::NeedMore => {
+                    let mut buf = [0; 4096];
+                    match self.reader.read(&mut buf) {
+                        Ok(0) => {
+                            self.state = NetlinkReaderState::Done;
+                            return Ok(None);
+                        },
+                        Ok(len) =>{
+                            self.buf.extend_from_slice(&buf[0..len]);
+                        },
+                        Err(e) => {
+                            self.state = NetlinkReaderState::Error;
+                            return Err(e);
+                        }
+                    }
+                },
+                NetlinkReaderState::Done => return Ok(None),
+                NetlinkReaderState::Error => return Ok(None),
+                NetlinkReaderState::Parsing => { },
+            }
             loop {
                 if let Some(pkt) = NetlinkPacket::new(&self.buf[self.read_at..]) {
                     let len = align(pkt.get_length() as usize);
                     if len == 0 {
                         return Ok(None);
                     }
+                    match pkt.get_kind() {
+                        NLMSG_ERROR => {
+                            self.state = NetlinkReaderState::Error;
+                            return Ok(None); /* XXX: fix me */
+                        },
+                        NLMSG_OVERRUN => {
+                            panic!("overrun!");
+                        },
+                        NLMSG_DONE => {
+                            self.state = NetlinkReaderState::Done;
+                        },
+                        NLMSG_NOOP => {
+                            println!("noop")
+                        },
+                        _ => {
+                            self.state = NetlinkReaderState::Parsing;
+                        },
+                    }
+                    let slot = NetlinkSlot::new(&self.buf[self.read_at..self.read_at + pkt.get_length() as usize]);
                     self.read_at += len;
-                    return Ok(Some(pkt.from_packet()));
+                    return Ok(Some(slot));
+                } else {
+                    self.state = NetlinkReaderState::NeedMore;
+                    break;
                 }
-                break;
             }
-            let mut buf = [0; 4096];
-            match self.reader.read(&mut buf) {
-                Ok(_) => self.buf.extend_from_slice(&buf),
-                Err(e) => return Err(e),
-            }
+        }
+    }
+}
+
+pub struct NetlinkSlotIterator<R: Read> {
+    reader: NetlinkReader<R>,
+}
+
+impl<R: Read> Iterator for NetlinkSlotIterator<R> {
+    type Item = NetlinkSlot;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self.reader.read_netlink() {
+            Ok(Some(slot)) => Some(slot),
+            _ => None,
         }
     }
 }
 
 pub struct NetlinkConnection {
     sock: NetlinkSocket,
-    buf: Vec<u8>,
 }
 
 impl NetlinkConnection {
     pub fn new() -> Self {
         NetlinkConnection {
             sock: NetlinkSocket::bind(NetlinkProtocol::Route, 0 as u32).unwrap(),
-            buf: vec![],
         }
     }
 
     pub fn send<'a,'b>(&'a mut self, msg: NetlinkPacket<'b>) -> NetlinkReader<&'a mut NetlinkSocket> {
         self.sock.send(msg.packet()).unwrap();
         NetlinkReader::new(&mut self.sock)
-        /*
-        NetlinkConnectionIterator {
-            sock: &mut self.sock,
-            buf: &mut self.buf,
-            pos: 0,
-        }
-        */
     }
 }
-
-pub struct NetlinkConnectionIterator<'a> {
-    sock: &'a mut NetlinkSocket,
-    buf: &'a mut Vec<u8>,
-    pos: usize,
-}
-
-impl<'a> Iterator for NetlinkConnectionIterator<'a> {
-    type Item = NetlinkPacket<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        None
-    }
-}
-
-/*
-pub struct NetlinkPacketIterator<'a> {
-    sock: &'a mut NetlinkSocket,
-    buf: Vec<u8>,
-    read_at: usize, // read index
-}
-
-impl<'a> NetlinkPacketIterator<'a> {
-    pub fn new(sock: &'a mut NetlinkSocket) -> Self {
-        NetlinkPacketIterator {
-            sock: sock,
-            buf: vec![],
-            read_at: 0,
-        }
-    }
-}
-
-pub struct NetlinkConnection<'a> {
-    sock: &'a mut NetlinkSocket,
-    buf: Vec<u8>
-}
-*/
-
-/*
-impl<'a> Iterator for NetlinkPacketIterator<'a> {
-    type Item = NetlinkPacket<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        loop {
-            loop {
-                // TODO: figure out how to make this safe
-                let nl_payload = unsafe { mem::transmute(&self.buf[self.read_at..]) };
-                if let Some(pkt) = NetlinkPacket::new(nl_payload) {
-                    let pid = unsafe { libc::getpid() } as u32;
-                    let kind = pkt.get_kind();
-                    match kind {
-                        NLMSG_NOOP => { println!("noop") },
-                        NLMSG_ERROR => {
-                            println!("err");
-                            return None;
-                        },
-                        NLMSG_DONE => {
-                            println!("done");
-                            return None;
-                        },
-                        NLMSG_OVERRUN => { println!("overrun") },
-                        _ => {
-                            println!("KIND IS {}", kind);
-                        },
-                    }
-
-                    if pkt.get_pid() != pid {
-                        println!("wrong pid!");
-                        continue;
-                    }
-
-                    self.read_at += align(pkt.get_length() as usize);
-                    if self.read_at == 0 {
-                        break;
-                    }
-                    return Some(pkt);
-                } else {
-                    break;
-                }
-            }
-            let mut rcvbuf = [0; 4096];
-            let sock = &mut self.sock;
-            if let Ok(len) = sock.recv(&mut rcvbuf) {
-                if len == 0 {
-                    break;
-                }
-                self.buf.extend_from_slice(&rcvbuf[0..len]);
-            } else {
-                break;
-            }
-        }
-        None
-    }
-}
-*/

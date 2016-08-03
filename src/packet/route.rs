@@ -2,7 +2,7 @@ use packet::netlink::{MutableNetlinkPacket,NetlinkPacket};
 use packet::netlink::{NLM_F_REQUEST, NLM_F_DUMP};
 use packet::netlink::{NLMSG_NOOP,NLMSG_ERROR,NLMSG_DONE,NLMSG_OVERRUN};
 use ::socket::{NetlinkSocket,NetlinkProtocol};
-use packet::netlink::{NetlinkPacketIterator,NetlinkConnection,NetlinkConnectionIterator};
+use packet::netlink::NetlinkConnection;
 use pnet::packet::MutablePacket;
 use pnet::packet::Packet;
 use pnet::packet::PacketSize;
@@ -84,61 +84,41 @@ impl<'a> Link<'a> {
         let mut buf = [0; 32];
         let mut reply = conn.send(Self::dump_links_request(&mut buf));
 
-        while let Ok(Some(pkt)) = reply.read_netlink() {
-            println!("{:?}", pkt);
-            /*
-            if pkt.kind == NLMSG_DONE {
-                break;
-            }
-            */
+        for slot in reply {
+            println!("{:?}", slot.get_packet());
+            Self::dump_link(slot.get_packet());
         }
-
-        /*
-        for pkt in reply {
-            println!("PKT: {:?}", pkt);
-        }
-        */
     }
 
-    /*
-    fn dump_links() {
+    fn dump_link(msg: NetlinkPacket<'a>) {
         use std::ffi::CStr;
-        use packet::netlink::NetlinkPacketIterator;
-        let mut sock = NetlinkSocket::bind(NetlinkProtocol::Route, 0 as u32).unwrap();
-        sock.send(&Link::dump_links_request()).unwrap();
+        if msg.get_kind() != RTM_NEWLINK {
+            println!("bad type!");
+            return;
+        }
 
-        let iter = NetlinkPacketIterator::new(&mut sock);
-        for msg in iter {
-            println!("{:?}", msg);
-            if msg.get_kind() != RTM_NEWLINK {
-                println!("bad type!");
-                continue;
-            }
-
-            if let Some(ifi) = IfInfoPacket::new(&msg.payload()[0..]) {
-                println!("├ ifi: {:?}", ifi);
-                let payload = &ifi.payload()[0..];
-                let iter = RtAttrIterator::new(payload);
-                for rta in iter {
-                    match rta.get_rta_type() {
-                        IFLA_IFNAME => {
-                            println!(" ├ ifname: {:?}", CStr::from_bytes_with_nul(rta.payload()));
-                        },
-                        IFLA_ADDRESS => {
-                            println!(" ├ hw addr: {:?}", rta.payload());
-                        },
-                        IFLA_LINKINFO => {
-                            println!(" ├ LINKINFO {:?}", rta);
-                        },
-                        _ => {
-                            println!(" ├ {:?}", rta);
-                        },
-                    }
+        if let Some(ifi) = IfInfoPacket::new(&msg.payload()[0..]) {
+            println!("├ ifi: {:?}", ifi);
+            let payload = &ifi.payload()[0..];
+            let iter = RtAttrIterator::new(payload);
+            for rta in iter {
+                match rta.get_rta_type() {
+                    IFLA_IFNAME => {
+                        println!(" ├ ifname: {:?}", CStr::from_bytes_with_nul(rta.payload()));
+                    },
+                    IFLA_ADDRESS => {
+                        println!(" ├ hw addr: {:?}", rta.payload());
+                    },
+                    IFLA_LINKINFO => {
+                        println!(" ├ LINKINFO {:?}", rta);
+                    },
+                    _ => {
+                        println!(" ├ {:?}", rta);
+                    },
                 }
             }
         }
     }
-    */
 }
 
 pub struct RtAttrIterator<'a> {
